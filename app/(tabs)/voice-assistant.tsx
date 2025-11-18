@@ -8,78 +8,106 @@ import {
   useAudioRecorder,
   useAudioRecorderState,
 } from 'expo-audio';
-import { Directory, File, Paths } from 'expo-file-system';
+import { File } from 'expo-file-system';
 import * as Speech from 'expo-speech';
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, ScrollView, StyleSheet } from 'react-native';
+import {
+  Alert,
+  ScrollView,
+  StyleSheet,
+  TouchableOpacity,
+  View,
+  Animated,
+  Dimensions,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
+import { MaterialIcons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Icon, IconProps } from '@expo/vector-icons/build/createIconSet';
+import { Colors } from '@/constants/theme';
 
 const WORKER_URL = 'https://broken-leaf-2ab3.azaininijar.workers.dev';
+const { width } = Dimensions.get('window');
 
 export default function VoiceAssistantScreen() {
-  // Permission state
   const [permissionGranted, setPermissionGranted] = useState(false);
-
-  // Recorder and its state
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recorderState = useAudioRecorderState(recorder);
-
-  // Player and its playback status
   const player = useAudioPlayer(null);
   const playerStatus = useAudioPlayerStatus(player);
-
   const [status, setStatus] = useState<'idle' | 'recording' | 'processing'>('idle');
   const [conversation, setConversation] = useState<{ user: string; bot: string }[]>([]);
 
-  // Request microphone permission on mount
+  const pulseAnim = useState(new Animated.Value(1))[0];
+  const fadeAnim = useState(new Animated.Value(0))[0];
+
   useEffect(() => {
     (async () => {
       const { granted } = await AudioModule.requestRecordingPermissionsAsync();
       setPermissionGranted(granted);
     })();
 
-    // Cleanup player on unmount
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 600,
+      useNativeDriver: true,
+    }).start();
+
     return () => {
       player.remove();
     };
   }, []);
 
-  // Speech to Text function
-  
-async function speechToText(audioUri: string): Promise<string> {
-  try {
-    const file = new File(audioUri);
-
-    const base64data = await file.base64()
-
-    console.log("AUDIO URI ====> ", audioUri);
-
-    const response = await fetch(`${WORKER_URL}/stt`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audio: base64data }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`STT failed: ${response.status} - ${errorText}`);
+  useEffect(() => {
+    if (status === 'recording') {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, {
+            toValue: 1.15,
+            duration: 800,
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnim, {
+            toValue: 1,
+            duration: 800,
+            useNativeDriver: true,
+          }),
+        ])
+      ).start();
+    } else {
+      pulseAnim.setValue(1);
     }
+  }, [status]);
 
-    const result = await response.json();
+  async function speechToText(audioUri: string): Promise<string> {
+    try {
+      const file = new File(audioUri);
+      const base64data = await file.base64();
 
-    console.log("STT RESPONSE JSON", result);
+      const response = await fetch(`${WORKER_URL}/stt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audio: base64data }),
+      });
 
-    if (!result.success || !result.transcript) {
-      throw new Error('Invalid STT response');
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`STT failed: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      if (!result.success || !result.transcript) {
+        throw new Error('Invalid STT response');
+      }
+
+      return result.transcript;
+    } catch (error) {
+      console.error('Speech-to-text failed:', error);
+      throw error;
     }
-
-    return result.transcript;
-  } catch (error) {
-    console.error('Speech-to-text failed:', error);
-    throw error;
   }
-}
 
-  // Send message to AI
   async function sendToAI(text: string): Promise<string> {
     try {
       const response = await fetch(WORKER_URL, {
@@ -111,49 +139,44 @@ async function speechToText(audioUri: string): Promise<string> {
     }
   }
 
+  useEffect(() => {
+    if (playerStatus.isLoaded && playerStatus.didJustFinish) {
+      player.pause();
+      player.remove();
+    }
+  }, [status]);
 
-useEffect(() => {
-  if (playerStatus.isLoaded && playerStatus.didJustFinish) {
-    player.pause();
-    player.remove();
+  async function playAISpeech(text: string) {
+    try {
+      const response = await fetch(`${WORKER_URL}/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+
+      if (!response.ok) throw new Error(`TTS failed: ${response.status}`);
+
+      const blob = await response.blob();
+      const reader = new FileReader();
+      reader.readAsDataURL(blob);
+      await new Promise((resolve) => {
+        reader.onloadend = resolve;
+      });
+
+      const base64data = (reader.result as string).split(',')[1];
+      const fileSource = { uri: `data:audio/mp3;base64,${base64data}`, isStatic: true };
+
+      await player.pause();
+      player.remove();
+      await player.replace({ uri: fileSource.uri });
+      await player.play();
+    } catch (error) {
+      console.error('AI TTS error:', error);
+      Alert.alert('TTS Error', 'Using fallback voice.');
+      Speech.speak(text, { language: 'id-ID' });
+    }
   }
-}, [status]);
 
-  // Play AI speech from TTS endpoint
-  
-async function playAISpeech(text: string) {
-  try {
-    const response = await fetch(`${WORKER_URL}/tts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-
-    if (!response.ok) throw new Error(`TTS failed: ${response.status}`);
-
-    const blob = await response.blob();
-    const reader = new FileReader();
-    reader.readAsDataURL(blob);
-    await new Promise((resolve) => { reader.onloadend = resolve; });
-
-    const base64data = (reader.result as string).split(',')[1];
-    // Untuk simpan file, gunakan cacheDirectory dari FileSystem
-    const fileSource = { uri: `data:audio/mp3;base64,${base64data}`, isStatic: true };
-
-    // Ganti audio source player menggunakan replace
-    await player.pause();
-    player.remove();
-    await player.replace({ uri: fileSource.uri });
-    await player.play();
-
-  } catch (error) {
-    console.error('AI TTS error:', error);
-    Alert.alert('TTS Error', 'Using fallback voice.');
-    Speech.speak(text, { language: 'id-ID' });
-  }
-}
-
-  // Start recording handler
   async function handleStartRecording() {
     if (!permissionGranted) {
       Alert.alert('Permission Required', 'Please grant microphone permission.');
@@ -164,7 +187,6 @@ async function playAISpeech(text: string) {
     recorder.record();
   }
 
-  // Stop recording handler
   async function handleStopRecording() {
     if (!recorderState.isRecording) return;
 
@@ -172,7 +194,6 @@ async function playAISpeech(text: string) {
     await recorder.stop();
 
     const uri = recorder.uri;
-
     if (!uri) {
       Alert.alert('Error', 'No recorded audio URI found.');
       setStatus('idle');
@@ -206,83 +227,240 @@ async function playAISpeech(text: string) {
     }
   }
 
+  const getStatusConfig = (): {
+    icon: any;
+    text: string;
+    color: string;
+  } => {
+    switch (status) {
+      case 'recording':
+        return { icon: 'mic', text: 'Listening...', color: '#d32f2f' };
+      case 'processing':
+        return { icon: 'autorenew', text: 'Processing...', color: '#1976d2' };
+      default:
+        return { icon: 'chat', text: 'Ready to chat', color: '#4caf50' };
+    }
+  };
+
+  const statusConfig = getStatusConfig();
+
   return (
-    <ThemedView style={styles.container}>
-      <ThemedText type="title" style={styles.title}>
-        🎤 Voice Assistant
-      </ThemedText>
+    <SafeAreaView style={styles.safeArea}>
+      <LinearGradient
+        colors={['#f7f9fc', '#e4e8ef']}
+        style={styles.gradient}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+      >
+        <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+          {/* Header */}
+          <View style={styles.header}>
+            <ThemedText type="title" style={styles.title}>
+              Voice Assistant
+            </ThemedText>
+            <ThemedText style={styles.subtitle}>Tap the microphone to start</ThemedText>
+          </View>
+          {/* Status */}
+          <View style={styles.statusRow}>
+            
+            {status === 'processing' ? (
+               <MaterialIcons
+               name={statusConfig.icon}
+               size={24}
+               color={statusConfig.color}
+               style={[styles.statusIcon, {
+                transform: [{ rotate: '45deg' }]
+               }]}
 
-      <ThemedView style={styles.buttonContainer}>
-        <Button
-          title={status === 'recording' ? '⏹️ Stop Recording' : '🎙️ Start Recording'}
-          onPress={status === 'recording' ? handleStopRecording : handleStartRecording}
-          disabled={status === 'processing'}
-          color={status === 'recording' ? '#ff4444' : '#4CAF50'}
-        />
-      </ThemedView>
+             />
+            ) : (
+              <MaterialIcons
+              name={statusConfig.icon}
+              size={24}
+              color={statusConfig.color}
+              style={styles.statusIcon}
+            />
+            )}
+            <ThemedText style={[styles.statusText, { color: statusConfig.color }]}>
+              {statusConfig.text}
+            </ThemedText>
+          </View>
 
-      <ThemedView style={styles.statusContainer}>
-        <ThemedText style={styles.status}>
-          Status:{' '}
-          {status === 'idle'
-            ? '⚪ Ready'
-            : status === 'recording'
-            ? '🔴 Recording...'
-            : '⏳ Processing...'}
-        </ThemedText>
-      </ThemedView>
-
-      <ScrollView style={styles.conversationContainer} contentContainerStyle={styles.conversationContent}>
-        {conversation.length === 0 ? (
-          <ThemedText style={styles.emptyState}>Tap the button above to start a conversation</ThemedText>
-        ) : (
-          conversation.map((entry, index) => (
-            <ThemedView key={index} style={styles.messageContainer}>
-              <ThemedView style={styles.userMessage}>
-                <ThemedText type="defaultSemiBold" style={styles.messageLabel}>
-                  You:
+          {/* Conversation */}
+          <ScrollView
+            style={styles.conversationContainer}
+            contentContainerStyle={styles.conversationContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {conversation.length === 0 ? (
+              <View style={styles.emptyStateContainer}>
+                <MaterialCommunityIcons name="microphone" size={64} color="#bbb" />
+                <ThemedText style={styles.emptyState}>
+                  Start a conversation by tapping the microphone below
                 </ThemedText>
-                <ThemedText style={styles.messageText}>{entry.user}</ThemedText>
-              </ThemedView>
+              </View>
+            ) : (
+              conversation.map((entry, index) => (
+                <View key={index} style={styles.messageContainer}>
+                  {/* User Message */}
+                  <View style={[styles.messageBubble, styles.userBubble]}>
+                    <ThemedText style={styles.messageLabel}>You</ThemedText>
+                    <ThemedText style={styles.messageText}>{entry.user}</ThemedText>
+                  </View>
 
-              <ThemedView style={styles.botMessage}>
-                <ThemedText type="defaultSemiBold" style={styles.messageLabel}>
-                  🤖 Assistant:
-                </ThemedText>
-                <ThemedText style={styles.messageText}>{entry.bot}</ThemedText>
-              </ThemedView>
-            </ThemedView>
-          ))
-        )}
-      </ScrollView>
-    </ThemedView>
+                  {/* Bot Message */}
+                  <View style={[styles.messageBubble, styles.botBubble]}>
+                    <ThemedText style={styles.messageLabel}>Assistant</ThemedText>
+                    <ThemedText style={styles.messageText}>{entry.bot}</ThemedText>
+                  </View>
+                </View>
+              ))
+            )}
+          </ScrollView>
+
+          {/* Microphone Button */}
+          <View style={styles.buttonContainer}>
+            <TouchableOpacity
+              onPress={status === 'recording' ? handleStopRecording : handleStartRecording}
+              disabled={status === 'processing'}
+              activeOpacity={0.7}
+            >
+              <Animated.View
+                style={[
+                  styles.micButton,
+                  {
+                    transform: [{ scale: pulseAnim }],
+                    backgroundColor: status === 'recording' ? '#d32f2f' : Colors.dark.icon,
+                    opacity: status === 'processing' ? 0.6 : 1,
+                  },
+                ]}
+              >
+                <MaterialIcons
+                  name={status === 'recording' ? 'stop' : 'mic'}
+                  size={36}
+                  color="#fff"
+                />
+              </Animated.View>
+            </TouchableOpacity>
+            <ThemedText style={styles.buttonHint}>
+              {status === 'recording' ? 'Tap to stop' : 'Tap to start'}
+            </ThemedText>
+          </View>
+        </Animated.View>
+      </LinearGradient>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20 },
-  title: { textAlign: 'center', marginBottom: 20 },
-  buttonContainer: { marginVertical: 10 },
-  statusContainer: { alignItems: 'center', marginVertical: 10 },
-  status: { fontSize: 16, fontWeight: '500' },
-  conversationContainer: { flex: 1, width: '100%', marginTop: 10 },
-  conversationContent: { paddingBottom: 20 },
-  emptyState: { textAlign: 'center', marginTop: 40, opacity: 0.6 },
-  messageContainer: { marginVertical: 10, gap: 8 },
-  userMessage: {
-    padding: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#4CAF50',
-    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+  safeArea: {
+    flex: 1,
   },
-  botMessage: {
-    padding: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#2196F3',
-    backgroundColor: 'rgba(33, 150, 243, 0.1)',
+  gradient: {
+    flex: 1,
   },
-  messageLabel: { marginBottom: 4 },
-  messageText: { fontSize: 15, lineHeight: 22 },
+  container: {
+    flex: 1,
+    padding: 20,
+  },
+  header: {
+    marginBottom: 24,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#222',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  subtitle: {
+    fontSize: 14,
+    color: '#555',
+    textAlign: 'center',
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  statusIcon: {
+    marginRight: 8,
+  },
+  statusText: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  conversationContainer: {
+    flex: 1,
+    marginBottom: 20,
+  },
+  conversationContent: {
+    paddingBottom: 20,
+  },
+  emptyStateContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 60,
+  },
+  emptyState: {
+    textAlign: 'center',
+    fontSize: 16,
+    color: '#999',
+    paddingHorizontal: 40,
+    lineHeight: 22,
+  },
+  messageContainer: {
+    marginBottom: 16,
+    gap: 4
+  },
+  messageBubble: {
+    borderRadius: 12,
+    padding: 12,
+    maxWidth: width * 0.85,
+    borderWidth: 1,
+    borderColor: Colors.dark.icon
+  },
+  userBubble: {
+    backgroundColor: '#e3f2fd',
+    alignSelf: 'flex-end',
+  },
+  botBubble: {
+    backgroundColor: '#f1f1f1',
+    alignSelf: 'flex-start',
+  },
+  messageLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#666',
+    marginBottom: 6,
+  },
+  messageText: {
+    fontSize: 15,
+    lineHeight: 22,
+    color: '#333',
+  },
+  buttonContainer: {
+    alignItems: 'center',
+    paddingVertical: 16,
+  },
+  micButton: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#222',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  buttonHint: {
+    marginTop: 10,
+    fontSize: 14,
+    color: Colors.dark.text,
+    fontWeight: '500',
+  },
 });
